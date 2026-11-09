@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: schema-first-mcp
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: PUBLIC_URL
+        fromService:
+          type: web
+          name: schema-first-mcp
+          property: url
