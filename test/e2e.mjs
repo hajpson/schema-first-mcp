@@ -29,18 +29,19 @@ async function main() {
   const code = new URL(loc).searchParams.get('code');
   console.log('authorize -> code', !!code);
 
-  // 3. token (client_secret_post)
+  // 3. token (public client: client_secret only if present)
+  const tokBody = {
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: 'http://localhost/callback',
+    client_id: reg.client_id,
+    code_verifier: verifier,
+  };
+  if (reg.client_secret) tokBody.client_secret = reg.client_secret;
   const tokRes = await fetch(`${BASE}/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: 'http://localhost/callback',
-      client_id: reg.client_id,
-      client_secret: reg.client_secret,
-      code_verifier: verifier,
-    }),
+    body: new URLSearchParams(tokBody),
   });
   const tok = await tokRes.json();
   if (!tok.access_token) throw new Error('no token: ' + JSON.stringify(tok));

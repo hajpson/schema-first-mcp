@@ -26,10 +26,14 @@ export const authProvider = {
         return [...clients.values()];
       },
       async registerClient(info) {
+        // Preserve the client's intended auth method. Dynamic clients that
+        // register with "none" are public clients and must NOT be given a
+        // secret, otherwise the token endpoint demands one and they fail.
+        const isPublic = info.token_endpoint_auth_method === 'none';
         const client = {
           ...info,
           client_id: info.client_id || randomUUID(),
-          client_secret: info.client_secret || randomUUID(),
+          client_secret: isPublic ? undefined : info.client_secret || randomUUID(),
         };
         clients.set(client.client_id, client);
         return client;
