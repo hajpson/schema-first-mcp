@@ -125,42 +125,97 @@ export const TOOLS = [
     inputSchema: TRANSCRIBE_IN,
     outputSchema: TRANSCRIBE_OUT,
     handler: async ({ url }) => {
-      return { structuredContent: await transcribeAudio(String(url)) };
+      return await transcribeAudio(String(url));
     },
   },
 ];
 
 export async function runTool(tool, args) {
   const result = await tool.handler(args);
-  return {
+  const out = {
     content: [{ type: 'text', text: 'ok' }],
     structuredContent: result.structuredContent,
   };
+  if (result.isError) out.isError = true;
+  return out;
 }
 
 async function transcribeAudio(url) {
   const res = await fetch(url, { redirect: 'follow' });
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  // Best-effort duration: for a WAV we can read the sample rate and frames;
-  // otherwise fall back to a placeholder segment list.
-  const duration = wavDuration(buf);
-  const segments = [];
-  if (duration > 0) {
-    const text = `audio segment of ${duration.toFixed(1)} seconds`;
-    segments.push({ start: 0, end: duration, text });
-  } else {
-    segments.push({ start: 0, text: 'audio received (duration unknown)' });
+  if (!res.ok) {
+    return { isError: true, structuredContent: { segments: [] } };
   }
-  return { segments };
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const buf = Buffer.from(await res.arrayBuffer());
+  const looksAudio =
+    contentType.includes('audio') ||
+    buf.subarray(0, 4).toString('ascii') === 'RIFF' ||
+    buf.subarray(0, 2).toString('hex') === '4944' || // ID3 (mp3)
+    buf.subarray(0, 4).toString('hex') === '66466667'; // fLaC
+  if (!looksAudio || buf.length === 0) {
+    // Not audio: a helpful answer is an error result, not a success.
+    return {
+      isError: true,
+      structuredContent: {
+        segments: [{ start: 0, text: 'the url did not resolve to audio' }],
+      },
+    };
+  }
+
+  const transcript = await transcribeWithAsr(buf, contentType);
+  if (!transcript) {
+    return { isError: true, structuredContent: { segments: [] } };
+  }
+  const segments = toSegments(transcript);
+  return { structuredContent: { segments } };
 }
 
-function wavDuration(buf) {
-  if (buf.length < 44) return 0;
-  if (buf.toString('ascii', 0, 4) !== 'RIFF') return 0;
-  const sampleRate = buf.readUInt32LE(24);
-  const byteRate = buf.readUInt32LE(28);
-  const dataSize = buf.length - 44;
-  if (byteRate <= 0 || sampleRate <= 0) return 0;
-  return dataSize / byteRate;
+async function transcribeWithAsr(buf, contentType) {
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) return null;
+  const fmt = contentType.includes('wav') ? 'wav'
+    : contentType.includes('mp3') || contentType.includes('mpeg') ? 'mp3'
+    : contentType.includes('ogg') ? 'ogg'
+    : contentType.includes('webm') ? 'webm'
+    : contentType.includes('flac') ? 'flac'
+    : 'mp3';
+  const dataUri = `data:${contentType || 'audio/mpeg'};base64,${buf.toString('base64')}`;
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://schema-first-mcp-wu31.onrender.com',
+      'X-OpenRouter-Title': 'schema-first-mcp',
+    },
+    body: JSON.stringify({
+      model: 'openai/gpt-audio-mini',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'input_audio', input_audio: { data: dataUri, format: fmt } },
+            { type: 'text', text: 'Transcribe this audio exactly, word for word. Preserve any spoken times, numbers, names and values.' },
+          ],
+        },
+      ],
+    }),
+  });
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content;
+  return typeof text === 'string' && text.trim() ? text.trim() : null;
+}
+
+function toSegments(transcript) {
+  // Split into sentence-ish chunks and assign increasing start times so each
+  // segment's text carries the words (including any spoken time).
+  const sentences = transcript.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [transcript];
+  let cursor = 0;
+  return sentences.map((s, i) => {
+    const text = s.trim();
+    const segment = { start: cursor, text };
+    cursor += Math.max(1, Math.round(text.split(' ').length / 2));
+    if (i === sentences.length - 1) segment.end = cursor;
+    return segment;
+  });
 }
