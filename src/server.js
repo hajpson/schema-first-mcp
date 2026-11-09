@@ -121,7 +121,106 @@ const protectedRes = requireBearerAuth({
 // Streamable HTTP keeps one Server per session. Key sessions by their id.
 const sessions = new Map();
 
+const DISCOVER_RESULT = {
+  resultType: 'complete',
+  supportedVersions: ['2026-07-28', '2025-11-25', '2025-06-18'],
+  capabilities: { tools: {} },
+  _meta: {
+    'io.modelcontextprotocol/serverInfo': { name: 'schema-first-mcp', version: '1.0.0' },
+  },
+  instructions:
+    'This remote MCP server exposes memo_write, memo_search, upload, and transcribe. ' +
+    'All results are structured content matching each tool output schema.',
+  ttlMs: 3600000,
+  cacheScope: 'public',
+};
+
 async function handleMcp(req, res) {
+  if (req.method !== 'POST' || !req.body || typeof req.body !== 'object') {
+    // GET is for SSE; our transport handles it. Pass through below.
+    return handleLegacy(req, res);
+  }
+
+  const meta = req.body.params?._meta || {};
+  const metaVersion = meta['io.modelcontextprotocol/protocolVersion'];
+  const headerVersion = req.headers['mcp-protocol-version'];
+  const modern = metaVersion === '2026-07-28' || headerVersion === '2026-07-28';
+
+  if (modern) {
+    return handleModern(req, res);
+  }
+
+  // server/discover may arrive without a protocol marker; answer it directly.
+  if (req.body.method === 'server/discover') {
+    return replyJsonRpc(res, req.body.id, DISCOVER_RESULT);
+  }
+
+  return handleLegacy(req, res);
+}
+
+async function handleModern(req, res) {
+  const method = req.body.method;
+  const id = req.body.id;
+  let result;
+  switch (method) {
+    case 'server/discover':
+      result = DISCOVER_RESULT;
+      break;
+    case 'tools/list':
+      result = {
+        tools: TOOLS.map((t) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+          outputSchema: t.outputSchema,
+        })),
+      };
+      break;
+    case 'tools/call': {
+      const name = req.body.params?.name;
+      const args = req.body.params?.arguments ?? {};
+      const tool = TOOLS.find((t) => t.name === name);
+      if (!tool) {
+        return replyJsonRpc(res, id, {
+          isError: true,
+          content: [{ type: 'text', text: `unknown tool: ${name}` }],
+        }, true);
+      }
+      try {
+        result = await runTool(tool, args);
+      } catch (err) {
+        result = { isError: true, content: [{ type: 'text', text: err.message || String(err) }] };
+      }
+      break;
+    }
+    case 'resources/list':
+      result = { resources: [] };
+      break;
+    case 'prompts/list':
+      result = { prompts: [] };
+      break;
+    case 'ping':
+      result = {};
+      break;
+    default:
+      return replyJsonRpc(res, id, {
+        code: -32601,
+        message: `Method not found: ${method}`,
+      }, true);
+  }
+  return replyJsonRpc(res, id, result);
+}
+
+function replyJsonRpc(res, id, result, isError) {
+  const body = { jsonrpc: '2.0' };
+  if (typeof id !== 'undefined' && id !== null) body.id = id;
+  if (isError) body.error = result;
+  else body.result = result;
+  res.setHeader('Content-Type', 'application/json');
+  return res.status(200).json(body);
+}
+
+async function handleLegacy(req, res) {
   const sessionId = req.headers['mcp-session-id'];
   let session = sessions.get(sessionId);
 
