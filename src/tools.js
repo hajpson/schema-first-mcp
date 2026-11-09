@@ -133,7 +133,7 @@ export const TOOLS = [
 export async function runTool(tool, args) {
   const result = await tool.handler(args);
   const out = {
-    content: [{ type: 'text', text: 'ok' }],
+    content: [{ type: 'text', text: result.message || 'ok' }],
     structuredContent: result.structuredContent,
   };
   if (result.isError) out.isError = true;
@@ -143,7 +143,8 @@ export async function runTool(tool, args) {
 async function transcribeAudio(url) {
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok) {
-    return { isError: true, structuredContent: { segments: [] } };
+    const msg = `could not fetch ${url}: HTTP ${res.status} ${res.statusText}`;
+    return err(msg);
   }
   const contentType = (res.headers.get('content-type') || '').toLowerCase();
   const buf = Buffer.from(await res.arrayBuffer());
@@ -153,21 +154,20 @@ async function transcribeAudio(url) {
     buf.subarray(0, 2).toString('hex') === '4944' || // ID3 (mp3)
     buf.subarray(0, 4).toString('hex') === '66466667'; // fLaC
   if (!looksAudio || buf.length === 0) {
-    // Not audio: a helpful answer is an error result, not a success.
-    return {
-      isError: true,
-      structuredContent: {
-        segments: [{ start: 0, text: 'the url did not resolve to audio' }],
-      },
-    };
+    // Not audio: a helpful answer names the url and says what is wrong.
+    return err(`the url ${url} is not audio: got ${contentType || 'unknown content-type'}`);
   }
 
   const transcript = await transcribeWithAsr(buf, contentType);
   if (!transcript) {
-    return { isError: true, structuredContent: { segments: [] } };
+    return err(`could not transcribe ${url}: transcription produced no text`);
   }
   const segments = toSegments(transcript);
   return { structuredContent: { segments } };
+}
+
+function err(message) {
+  return { isError: true, message, structuredContent: { segments: [] } };
 }
 
 async function transcribeWithAsr(buf, contentType) {
