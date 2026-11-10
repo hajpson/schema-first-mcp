@@ -7,7 +7,7 @@ import { mcpAuthRouter, mcpAuthMetadataRouter, getOAuthProtectedResourceMetadata
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { TOOLS, runTool, setPublicBase } from './tools.js';
 import { authProvider, tokenVerifier } from './auth-provider.js';
-import { listUploads, UPLOAD_DIR } from './store.js';
+import { fetchUpload } from './store.js';
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_URL =
@@ -69,14 +69,24 @@ app.use(
   })
 );
 
-// ---- Uploaded files served publicly ----
-app.get('/files/:id/:name', (req, res) => {
-  const uploads = listUploads();
-  const match = uploads.find((f) => f.startsWith(req.params.id));
-  if (!match) {
-    return res.status(404).send('not found');
+// ---- Uploaded files served publicly (bytes live in R2) ----
+app.get('/files/:id/:name', async (req, res) => {
+  try {
+    const { body, contentType } = await fetchUpload(req.params.id, req.params.name);
+    res.setHeader('Content-Type', contentType);
+    const stream = body;
+    if (stream && typeof stream.pipe === 'function') {
+      stream.pipe(res);
+    } else {
+      res.send(typeof stream === 'string' ? stream : Buffer.from(stream || ''));
+    }
+  } catch (err) {
+    if (err && (err.name === 'NoSuchKey' || err.name === 'NotFound')) {
+      return res.status(404).send('not found');
+    }
+    console.error('upload fetch error:', err);
+    return res.status(500).send('error');
   }
-  res.sendFile(match, { root: UPLOAD_DIR });
 });
 
 // ---- Low-level MCP Server factory: one instance per connection ----

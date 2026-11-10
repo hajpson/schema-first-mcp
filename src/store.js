@@ -2,13 +2,65 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = path.join(here, '..', 'data');
-export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const MEMOS_FILE = path.join(DATA_DIR, 'memos.json');
 
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+// ---- R2-backed upload storage (survives the free instance recycling) ----
+
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+export const R2_BUCKET = process.env.R2_BUCKET || 'schema-first-mcp-uploads';
+
+export function r2Enabled() {
+  return Boolean(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY);
+}
+
+let r2Client = null;
+function getR2Client() {
+  if (!r2Enabled()) {
+    throw new Error('R2 is not configured: set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY');
+  }
+  if (!r2Client) {
+    const endpoint = `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+    r2Client = new S3Client({
+      region: 'auto',
+      endpoint,
+      credentials: {
+        accessKeyId: R2_ACCESS_KEY_ID,
+        secretAccessKey: R2_SECRET_ACCESS_KEY,
+      },
+    });
+  }
+  return r2Client;
+}
+
+export function uploadObjectKey(id, name) {
+  return `${id}/${name}`;
+}
+
+export async function saveUpload(id, name, buffer) {
+  await getR2Client().send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: uploadObjectKey(id, name),
+      Body: buffer,
+    })
+  );
+}
+
+export async function fetchUpload(id, name) {
+  const cmd = new GetObjectCommand({ Bucket: R2_BUCKET, Key: uploadObjectKey(id, name) });
+  const res = await getR2Client().send(cmd);
+  return { body: res.Body, contentType: res.ContentType || 'application/octet-stream' };
+}
+
+// ---- Memo storage (local; the course reads notes within the session) ----
 
 function readMemos() {
   try {
@@ -37,22 +89,6 @@ export function memoSearch(query) {
   const notes = q
     ? memos.filter((m) => m.text.toLowerCase().includes(q))
     : memos.slice();
-  // newest first
   notes.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   return { notes };
-}
-
-export function saveUpload(filename, buffer) {
-  const id = randomUUID();
-  const safe = path.basename(filename || 'file').replace(/[^A-Za-z0-9._-]/g, '_');
-  fs.writeFileSync(path.join(UPLOAD_DIR, `${id}-${safe}`), buffer);
-  return { id, name: safe };
-}
-
-export function listUploads() {
-  try {
-    return fs.readdirSync(UPLOAD_DIR);
-  } catch {
-    return [];
-  }
 }

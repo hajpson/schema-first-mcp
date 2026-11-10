@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { memoWrite, memoSearch, saveUpload } from './store.js';
 
 export function setPublicBase(u) {
@@ -114,7 +115,9 @@ export const TOOLS = [
     outputSchema: UPLOAD_OUT,
     handler: async ({ filename, content }) => {
       const buf = Buffer.from(String(content), 'base64');
-      const { id, name } = saveUpload(String(filename), buf);
+      const id = randomUUID();
+      const name = String(filename || 'file').replace(/[^A-Za-z0-9._-]/g, '_') || 'file';
+      await saveUpload(id, name, buf);
       return { structuredContent: { url: `${PUBLIC_BASE}/files/${id}/${name}` } };
     },
   },
